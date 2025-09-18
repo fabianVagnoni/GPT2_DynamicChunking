@@ -1,0 +1,1 @@
+Calc % Decrease from -ln(1/Options)

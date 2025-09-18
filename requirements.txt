@@ -1,0 +1,5 @@
+torch
+huggingface
+dataclasses
+transformers
+tiktoken
