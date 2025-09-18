@@ -23,8 +23,9 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd & config.n_head == 0
         # Key, Query, Value projections in Batch
         self.c_attn = nn.Linear(config.n_embd , 3 * config.n_embd)
-        # Output Projections
+        # Output Projections for residual
         self.c_proj = nn.Linear(config.n_embd , config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1.0 # Attribute to signal that proj is a residual connection and must be scaled to (1/sqrt(n))
         # Reg
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -60,7 +61,8 @@ class MLP(nn.Module): # Two linnear proj sandwiched between a Gelu
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd) # Residual
+        self.c_proj.NANOGPT_SCALE_INIT = 1.0 # Attribute to signal that proj is a residual connection and must be scaled to (1/sqrt(n))
         self.gelu = nn.GELU(approximate="tanh")
     
     def forward(self, x):
@@ -106,7 +108,22 @@ class GPT(nn.Module):
 
         # Weight sharing scheme for WTE & the output head
         self.transformer.wte.weight = self.lm_head.weight # Now both weights share pointer in memory
+        # We had 50,000 vocab_size and 768 hidden_dim => Each one was around 40M parameters
+        # 40M out of 124M is around 30% ==> We're saving 30% of the model's parameters
+
+        # Init weights following GPT-2
+        self.apply(self._init_weights) # Apply() is a method of the nn.Module which applies a function iteratively to all submodules of your module
     
+    def _init_weights(self, module, std=0.02):
+        if isinstance(module, nn.Linear):
+            if hasattr(module,"NANOGPT_SCALE_INIT"):
+                std *= (2 * self.config.n_layer) ** -0.5 # 2 times number of layers because the transformer has two blocks that add to the residual pathway => MLP & Attn
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std) # Normal dist for linear layers w/ std 0.02
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias) # Zeros for biases
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std) # Normal dist for emb layers w/ std 0.02
+
     def forward(self, idx, targets=None):
         loss = None
         # ids => (B, T) [Batch sequences of T ids]
@@ -190,4 +207,7 @@ def set_device():
     if device.type != "cuda" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         device = torch.device("mps")
     print(f"Using device: {device}")
+    torch.manual_seed(1337)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(1337)
     return device

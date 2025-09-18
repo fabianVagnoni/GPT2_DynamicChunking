@@ -56,4 +56,4 @@ def test_loader():
         loss.backward()
         optimizer.step()
         print(f"Step {i} -> Loss: {loss}")
-#test_loader()
+test_loader()
