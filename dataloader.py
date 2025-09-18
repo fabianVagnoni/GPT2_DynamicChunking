@@ -20,7 +20,7 @@ class DataLoaderLite:
         with open("input.txt", "r") as f:
             text = f.read()
         enc = tiktoken.get_encoding(model_name)
-        self.tokens = torch.tensor(enc.encode(text), device=device)
+        self.tokens = torch.tensor(enc.encode(text)) # No move to GPU now to save on memory
         print(f"Loaded {len(self.tokens)} tokens")
         print(f"{len(self.tokens) // (B*T)} batches per epoch")
 
@@ -50,6 +50,7 @@ def test_loader():
 
     for i in range(STEPS):
         x,y = loader.next_batch()
+        x,y = x.to(device), y.to(device)
         optimizer.zero_grad()
         logits, loss = model(x,y)
         loss.backward()

@@ -103,6 +103,9 @@ class GPT(nn.Module):
 
         # FC head
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # Weight sharing scheme for WTE & the output head
+        self.transformer.wte.weight = self.lm_head.weight # Now both weights share pointer in memory
     
     def forward(self, idx, targets=None):
         loss = None
