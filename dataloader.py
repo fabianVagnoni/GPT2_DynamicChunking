@@ -2,6 +2,7 @@ import tiktoken
 import torch
 # from generate import generate
 from gpt2_module import GPT, GPTConfig, set_device
+from lr_scheduler import get_lr
 import time
 
 MAX_TEXT = 1000000
@@ -53,7 +54,7 @@ def test_loader():
     torch.compile(model)
     optimizer = torch.optim.AdamW(model.parameters(),lr=LR,betas=(0.9,0.95),eps=1e-8) # Explicit GPT-3 paper hyperparams
 
-    for i in range(STEPS):
+    for step in range(STEPS):
         t0 = time.time()
         x,y = loader.next_batch()
         x,y = x.to(device), y.to(device)
@@ -65,12 +66,16 @@ def test_loader():
             logits, loss = model(x,y)
         loss.backward()
         norm = torch.nn.utils.clip_grad_norm(model.parameters(), 1.0) # Print thenorm to supervise training. We want stable norm, spike may signal underlying issue
+        # Determine LR given the scheduler
+        lr = get_lr(step)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
         optimizer.step()
         if torch.cuda.is_available():
             torch.cuda.synchronize() # "Wait for the GPU and the CPU to be on the same step"
         t1 = time.time()
         dt = t1 - t0
         tokens_per_sec = loader.B * loader.T / dt
-        print(f"Step {i} -> Loss: {loss} | norm {norm:.5f} | dt: {dt:.2f}s | tokens/sec: {tokens_per_sec:.2f}")
+        print(f"Step {step} -> Loss: {loss} | lr: {lr:.4e} | norm: {norm:.5f} | dt: {dt:.2f}s | tokens/sec: {tokens_per_sec:.2f}")
 
 test_loader()
