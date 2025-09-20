@@ -6,6 +6,8 @@ from transformers import GPT2LMHeadModel
 import tiktoken
 SEED = 42
 
+# -------------------------------------------------------------------------------------------------
+
 # dataclass decorator automatically registers an __init__ method
 # that saves all the attributes to self
 @dataclass
@@ -15,6 +17,8 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
+
+# -------------------------------------------------------------------------------------------------
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config: GPTConfig):
@@ -45,17 +49,20 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1,2) 
 
         # Attention
-        att = (q @ k.transpose(-2, -1) * (1.0 / T**(.5))) # (B, n_heads, T, head_size) @ (B, n_heads, head_size , T) = (B, n_heads, T, T)
-        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float("-inf")) # Where the mask is 0 (Upper Triangle of Future Tokens), fill -inf
-        att = F.softmax(att, dim=-1)
-        y = att @ v # (B, n_heads, T, T) @ (B, n_heads, T, head_size) => (B, n_heads, T, head_size)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # Reassemble outputs by concatenating n_head w/ head_size => (B, T, C) [The contiguous "saved into a memory chunk" the view]
+        # att = (q @ k.transpose(-2, -1) * (1.0 / T**(.5))) # (B, n_heads, T, head_size) @ (B, n_heads, head_size , T) = (B, n_heads, T, T)
+        # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float("-inf")) # Where the mask is 0 (Upper Triangle of Future Tokens), fill -inf
+        # att = F.softmax(att, dim=-1)
+        # y = att @ v # (B, n_heads, T, T) @ (B, n_heads, T, head_size) => (B, n_heads, T, head_size)
         
+        # FlashAttention -> We perform all operations on GPU memory w/o moving the big att matrix to HBM
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
         # Projection
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # Reassemble outputs by concatenating n_head w/ head_size => (B, T, C) [The contiguous "saved into a memory chunk" the view]
         y = self.c_proj(y)
         return y
 
-
+# -------------------------------------------------------------------------------------------------
 
 class MLP(nn.Module): # Two linnear proj sandwiched between a Gelu
     def __init__(self, config: GPTConfig):
@@ -71,6 +78,7 @@ class MLP(nn.Module): # Two linnear proj sandwiched between a Gelu
         x = self.c_proj(x)
         return x
 
+# -------------------------------------------------------------------------------------------------
 
 # Transformer Block with Layer Norms, MLP head & Attention Mechanism
 class Block(nn.Module):
@@ -89,6 +97,7 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
+# -------------------------------------------------------------------------------------------------
 
 class GPT(nn.Module):
     def __init__(self, config: GPTConfig):
@@ -201,13 +210,18 @@ class GPT(nn.Module):
 
         return model
 
+# -------------------------------------------------------------------------------------------------
 
 def set_device():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device_str)
     if device.type != "cuda" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         device = torch.device("mps")
     print(f"Using device: {device}")
+
+    # Setting Seed & Precision TF16
     torch.manual_seed(1337)
+    torch.set_float32_matmul_precision("high")
     if torch.cuda.is_available():
         torch.cuda.manual_seed(1337)
-    return device
+    return device, device_str

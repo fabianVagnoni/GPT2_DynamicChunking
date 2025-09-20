@@ -2,14 +2,17 @@ import tiktoken
 import torch
 # from generate import generate
 from gpt2_module import GPT, GPTConfig, set_device
+import time
 
 MAX_TEXT = 1000000
 MODEL = "gpt2"
 STEPS = 50
 B = 4
-T = 32
+T = 16
 LR = 3e-4
-device = set_device()
+device, device_str = set_device()
+
+# -------------------------------------------------------------------------------------------------
 
 class DataLoaderLite:
     def __init__(self, B, T, model_name, device):
@@ -41,19 +44,33 @@ class DataLoaderLite:
             self.current_position = 0
         return x,y
 
+# -------------------------------------------------------------------------------------------------
 
 def test_loader():
     loader = DataLoaderLite(B,T,MODEL,device)
-    model = GPT(GPTConfig())
+    model = GPT(GPTConfig(vocab_size=50304)) # 50304 is a nice number, can be even divided by 128!!!
     model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(),lr=LR)
+    torch.compile(model)
+    optimizer = torch.optim.AdamW(model.parameters(),lr=LR,betas=(0.9,0.95),eps=1e-8) # Explicit GPT-3 paper hyperparams
 
     for i in range(STEPS):
+        t0 = time.time()
         x,y = loader.next_batch()
         x,y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        logits, loss = model(x,y)
+        if torch.cuda.is_available(): # Use Mixed Precision ONLY w/ GPU
+            with torch.autocast(device_type=device_str, dtype=torch.bfloat16):
+                logits, loss = model(x,y)
+        else:
+            logits, loss = model(x,y)
         loss.backward()
+        norm = torch.nn.utils.clip_grad_norm(model.parameters(), 1.0) # Print thenorm to supervise training. We want stable norm, spike may signal underlying issue
         optimizer.step()
-        print(f"Step {i} -> Loss: {loss}")
+        if torch.cuda.is_available():
+            torch.cuda.synchronize() # "Wait for the GPU and the CPU to be on the same step"
+        t1 = time.time()
+        dt = t1 - t0
+        tokens_per_sec = loader.B * loader.T / dt
+        print(f"Step {i} -> Loss: {loss} | norm {norm:.5f} | dt: {dt:.2f}s | tokens/sec: {tokens_per_sec:.2f}")
+
 test_loader()
