@@ -11,6 +11,7 @@ STEPS = 50
 B = 4
 T = 16
 LR = 3e-4
+WEIGHT_DECAY = 0.1
 device, device_str = set_device()
 
 # -------------------------------------------------------------------------------------------------
@@ -52,7 +53,8 @@ def test_loader():
     model = GPT(GPTConfig(vocab_size=50304)) # 50304 is a nice number, can be even divided by 128!!!
     model.to(device)
     torch.compile(model)
-    optimizer = torch.optim.AdamW(model.parameters(),lr=LR,betas=(0.9,0.95),eps=1e-8) # Explicit GPT-3 paper hyperparams
+    # optimizer = torch.optim.AdamW(model.parameters(),lr=LR,betas=(0.9,0.95),eps=1e-8) # Explicit GPT-3 paper hyperparams
+    optimizer = model.configure_optimizer(weight_decay=WEIGHT_DECAY, lr=LR, device=device_str)
 
     for step in range(STEPS):
         t0 = time.time()

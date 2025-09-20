@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from transformers import GPT2LMHeadModel
 import tiktoken
+import inspect
 SEED = 42
 
 # -------------------------------------------------------------------------------------------------
@@ -209,6 +210,30 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
+
+    def configure_optimizer(self, weight_decay, lr, device):
+        # Start w/ all candidate params (that require gra)
+        param_dict = {pn : p for pn, p in self.named_parameters()}
+        param_dict = {pn : p for pn, p in param_dict.items() if p.requires_grad}
+
+        # Create optim Groups -> 2D or more dim params will be decayed | 1D won't
+        # v.g., all biases and layer norm won't
+        decay_params = [p for n,p in param_dict.items() if p.dim() >= 2]
+        no_decay_params = [p for n,p in param_dict.items() if p.dim() < 2]
+        opt_groups = [ # Decay is useful to "bring down" params sizes such that one param doesn't drive too much info. It makes not much sense to include it in 1D
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0}
+        ]
+        num_decay = sum(p.numel() for p in decay_params)
+        no_num_decay = sum(p.numel() for p in no_decay_params)
+        print(f"Num Decay Param tensors {len(decay_params)}, with {num_decay:,} params")
+        print(f"Num Decay Param tensors {len(no_decay_params)}, with {no_num_decay:,} params")
+        # Create optimizer using fused for efficiency, if available
+        fused_aval = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_aval and "cuda" in device
+        print(f"Fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(opt_groups, lr=lr, betas=(0.9,0.95), eps=1e-8, fused=use_fused)
+        return optimizer
 
 # -------------------------------------------------------------------------------------------------
 
