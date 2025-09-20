@@ -226,7 +226,7 @@ class GPT(nn.Module):
         ]
         num_decay = sum(p.numel() for p in decay_params)
         no_num_decay = sum(p.numel() for p in no_decay_params)
-        print(f"Num Decay Param tensors {len(decay_params)}, with {num_decay:,} params")
+        print(f"Num Decay Param tensors {len(decay_params)}, with {num_decay:,} params") # We expect way more decayed params than not decayed
         print(f"Num Decay Param tensors {len(no_decay_params)}, with {no_num_decay:,} params")
         # Create optimizer using fused for efficiency, if available
         fused_aval = "fused" in inspect.signature(torch.optim.AdamW).parameters

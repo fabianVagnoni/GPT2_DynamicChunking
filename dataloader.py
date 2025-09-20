@@ -8,11 +8,17 @@ import time
 MAX_TEXT = 1000000
 MODEL = "gpt2"
 STEPS = 50
-B = 4
-T = 16
 LR = 3e-4
 WEIGHT_DECAY = 0.1
 device, device_str = set_device()
+
+# Batch Sizes
+DESIRED_B = 2*256 #524288 # 2**19, nice number near 500k
+B = 16 # micro-batch size
+T = 16
+assert DESIRED_B % (B*T) == 0, "Make sure the desired batch size is divisible by the micro-batch (B) size times the sequence length (T)"
+grad_accum_steps = DESIRED_B // (B*T) # We will foward-backward grad_accum_steps times W/O calling update, just += to the grad
+print(f"Desired Batch Size: {DESIRED_B} | Micro-Batch Size: {B} | Sequence Length: {T} => Gradient Accumulation Update: {grad_accum_steps} steps")
 
 # -------------------------------------------------------------------------------------------------
 
@@ -58,15 +64,20 @@ def test_loader():
 
     for step in range(STEPS):
         t0 = time.time()
-        x,y = loader.next_batch()
-        x,y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        if torch.cuda.is_available(): # Use Mixed Precision ONLY w/ GPU
-            with torch.autocast(device_type=device_str, dtype=torch.bfloat16):
+        loss_accum = 0.0
+        for grad_step in range(grad_accum_steps):
+            x,y = loader.next_batch()
+            x,y = x.to(device), y.to(device)
+            if torch.cuda.is_available(): # Use Mixed Precision ONLY w/ GPU
+                with torch.autocast(device_type=device_str, dtype=torch.bfloat16):
+                    logits, loss = model(x,y)
+            else:
                 logits, loss = model(x,y)
-        else:
-            logits, loss = model(x,y)
-        loss.backward()
+            loss = (1/grad_accum_steps) * loss # Normalized loss to avoid mere summation
+            loss_accum += loss.detach()
+            loss.backward() # Implicit += to grads
+
         norm = torch.nn.utils.clip_grad_norm(model.parameters(), 1.0) # Print thenorm to supervise training. We want stable norm, spike may signal underlying issue
         # Determine LR given the scheduler
         lr = get_lr(step)
@@ -77,7 +88,7 @@ def test_loader():
             torch.cuda.synchronize() # "Wait for the GPU and the CPU to be on the same step"
         t1 = time.time()
         dt = t1 - t0
-        tokens_per_sec = loader.B * loader.T / dt
-        print(f"Step {step} -> Loss: {loss} | lr: {lr:.4e} | norm: {norm:.5f} | dt: {dt:.2f}s | tokens/sec: {tokens_per_sec:.2f}")
+        tokens_per_sec = grad_accum_steps * loader.B * loader.T / dt
+        print(f"Step {step} -> Loss: {loss_accum} | lr: {lr:.4e} | norm: {norm:.5f} | dt: {dt:.2f}s | tokens/sec: {tokens_per_sec:.2f}")
 
 test_loader()
