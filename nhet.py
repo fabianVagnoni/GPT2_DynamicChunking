@@ -1,3 +1,8 @@
+from dataclasses import dataclass
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 @dataclass
 class HNetConfig:
     block_size: int = 1024
@@ -14,7 +19,7 @@ class HNetConfig:
 # -------------------------------------------------------------------------------------------------
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: HNetConfig):
         super().__init__()
         # Debug
         assert config.n_embd & config.n_head == 0
@@ -52,7 +57,7 @@ class CausalSelfAttention(nn.Module):
 # -------------------------------------------------------------------------------------------------
 
 class MLP(nn.Module): # Two linnear proj sandwiched between a Gelu
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: HNetConfig):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd) # Residual
@@ -69,7 +74,7 @@ class MLP(nn.Module): # Two linnear proj sandwiched between a Gelu
 
 # Transformer Block with Layer Norms, MLP head & Attention Mechanism
 class Block(nn.Module):
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: HNetConfig):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config) # Map(?)
@@ -87,14 +92,15 @@ class Block(nn.Module):
 # -------------------------------------------------------------------------------------------------
 
 class DynChunking(nn.Module):
-    def __init__(self, n_embd, threshold):
+    def __init__(self, n_embd, threshold, config: HNetConfig):
         super().__init__()
         self.Wkq = nn.Linear(n_embd,n_embd*2,bias=False)        
         self.threshold = threshold
+        self.config = config
 
     def route(self, x, attn_mask=None):
         kq = self.Wkq(x)
-        k,q = kq.split(self.n_embd, dim=2) # (B,T,C*2) => 2 * (B,T,C)
+        k,q = kq.split(self.config.n_embd, dim=2) # (B,T,C*2) => 2 * (B,T,C)
         k_prev = torch.roll(k, shifts=1, dims=1) # k{t-1}
         p = 0.5 * (1 - self._cos_sim(q, k_prev)) # (B,T)
         p[:,0] = 1.0 # Boundary start
@@ -111,7 +117,7 @@ class DynChunking(nn.Module):
         B,T,C = x.shape
 
         # Check what indices to keep
-        keep_ix = b > 0.5 # (B,T), bool
+        keep_ix = bt > 0.5 # (B,T), bool
         counts = keep_ix.sum(dim=1) # (B,) => How many items to keep per row, max will be padding
         Tds = int(counts.max().item()) # Padding index
         
@@ -120,8 +126,8 @@ class DynChunking(nn.Module):
         sel = perm[:, :Tds]                       # (B, Tds), padded
         
         # Dechunk mask for position & gather chunks
-        mask_ds = torch.arange(Tds, device=x_hat.device).unsqueeze(0) < counts.unsqueeze(1) # (B, Tds), masking range above count
-        x_chunks = torch.take_along_dim(x_hat, sel.unsqueeze(-1).expand(-1, -1, E), dim=1) # (B, Tds, E)
+        mask_ds = torch.arange(Tds, device=x.device).unsqueeze(0) < counts.unsqueeze(1) # (B, Tds), masking range above count
+        x_chunks = torch.take_along_dim(x, sel.unsqueeze(-1).expand(-1, -1, C), dim=1) # (B, Tds, E)
         P_chunks = torch.take_along_dim(p, sel, dim=1) # (B, Tds)
         
         # Zero-Out padding
@@ -132,7 +138,7 @@ class DynChunking(nn.Module):
         # State for dechunking
         state = {
             "p_full": p, # (B, T)
-            "b_full": b, # (B, T)
+            "b_full": bt, # (B, T)
             "gather_idx": gather_idx, # (B, Tds)
             "mask_ds": mask_ds, # (B, Tds)
         }
@@ -160,7 +166,7 @@ class DynChunking(nn.Module):
 # -------------------------------------------------------------------------------------------------
 
 class HNet(nn.Module):
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: HNetConfig):
         super().__init__()
         self.config = config
         self.embedding = HNetEmbedding(config.vocab_size, config.block_size, config.n_embd)
