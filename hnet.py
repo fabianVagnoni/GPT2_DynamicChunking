@@ -15,7 +15,6 @@ class HNetConfig:
     pad_id: int = 256
     use_bias: bool = True
 
-
 # -------------------------------------------------------------------------------------------------
 
 class CausalSelfAttention(nn.Module):
@@ -152,15 +151,55 @@ class DynChunking(nn.Module):
         return (a_n * b_n).sum(dim=-1) 
 
     @staticmethod
-    def ratio_loss(p, b, mask, att_mask=None):
+    def ratio_loss(p, b, mask, N=3, att_mask=None):
         B,T = p.shape
         att_mask = att_mask if att_mask else torch.ones((B,T))
         L = att_mask.sum(dim=1).clamp_min(1).float() # (B,)
         F = ((b > 0.5).float() * att_mask.float()).sum(dim=1) / L # ""
         G = (p * att_mask.float()).sum(dim=1) / L   # ""
-        ratio = coef * (((N - 1.0) * F * G) + ((1.0 - F) * (1.0 - G))) # ""
+        ratio = (N/(N-1)) * (((N - 1.0) * F * G) + ((1.0 - F) * (1.0 - G))) # ""
 
+# -------------------------------------------------------------------------------------------------
 
+class DeChunking(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @staticmethod
+    def upsample(self, zt, state):
+        B,T,C = zt.shape
+        pt, bt, gather_idx, mask_ds = state["p_full"], state["b_full"], state["gather_idx"], state["mask_ds"]
+        # Confidence scoring (Eq 6)
+        ct = (pt ** bt) * (pt.new_zeros(pt.shape) - pt) ** bt # (B,T)
+        # Gradient stabilization (Eq 7)
+        ct_ste = ct + (1.0 - ct).detach() # (B,T)
+        # Causal expansion (Eq 8)
+        bt_int = (bt > 0.5).long() # (B,T)
+        idx = torch.cumsum(bt_int, dim=1) - 1 # (B,T), determine what index to expand
+        idx = idx.clamp(min=0, max=Tds - 1) # (B,T), cut to padding length
+        i_arange = torch.arange(B, device=x_chunks.device).unsqueeze(1).expand(B, T) # (B, T)
+        z_up = x_chunks[i_arange, idx]  # (B, Tds, C) => (B, T, C) 
+        # Confidence-weighted decompression (9)
+        z_up = ct.unsqueeze(-1) * z_up # (B,T,1)(Broadcasted into (B,T,C)) * (B,T,C) => (B,T,C)
+
+    @staticmethod
+    def ema(self, z, pt, eps=1e-12): # Eq (5)
+        B, L, D = z.shape
+        decay = (1.0 - P).clamp_min(eps) # [B, T]
+        S = torch.cumsum(torch.log(decay), dim=1)  #  [B, T]
+
+        # Build all pairwise differences S_t (B, T, 1) - S_k (B, T, T) => (B, T, T)
+        delta = S.unsqueeze(2) - S.unsqueeze(1)
+
+        # exp(Delta) gives prod_{j=k+1..t} (1-p_j); mask to lower triangle (k <= t)
+        W = torch.tril(torch.exp(delta)) # (B, T, T)
+
+        # Multiply each column k by p_k
+        W = W * P.unsqueeze(1) # (B, T, T), broadcasted over k-dim
+
+        # batched causal matmul: bar_z[b,t,:] = sum_k W[b,t,k] * z[b,k,:]
+        bar_z = W @ z # (B, T, C)
+        return bar_z
 
 
 # -------------------------------------------------------------------------------------------------
