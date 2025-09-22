@@ -21,7 +21,7 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config: HNetConfig):
         super().__init__()
         # Debug
-        assert config.n_embd & config.n_head == 0
+        assert config.n_embd % config.n_head == 0
         # Key, Query, Value projections in Batch
         self.c_attn = nn.Linear(config.n_embd , 3 * config.n_embd)
         # Output Projections for residual
@@ -158,6 +158,7 @@ class DynChunking(nn.Module):
         F = ((b > 0.5).float() * att_mask.float()).sum(dim=1) / L # ""
         G = (p * att_mask.float()).sum(dim=1) / L   # ""
         ratio = (N/(N-1)) * (((N - 1.0) * F * G) + ((1.0 - F) * (1.0 - G))) # ""
+        return ratio
 
 # -------------------------------------------------------------------------------------------------
 
@@ -208,7 +209,8 @@ class HNet(nn.Module):
     def __init__(self, config: HNetConfig):
         super().__init__()
         self.config = config
-        self.embedding = HNetEmbedding(config.vocab_size, config.block_size, config.n_embd)
+        self.wte = nn.Embedding(config.vocab_size , config.n_embd), # Token Embeds 
+        self.wpe = nn.Embedding(config.block_size , config.n_embd), # Post Embd
 
         self.encoder = nn.ModuleDict(dict(# Dictionary of modules, saves the keys
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
@@ -227,3 +229,42 @@ class HNet(nn.Module):
 
         self.chunking = DynChunking(config.n_embd)
         self.dechunk = DeChunk()
+        self.residual = nn.Linear(config.n_embd,config.n_embd)
+        self.lm_head = nn.Linear(config.n_embd,config.vocab_size)
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                            .view(1, 1, config.block_size, config.block_size))
+
+    def forward(self, idx, targets=None):
+        loss = None
+        # ids => (B, T) [Batch sequences of T ids]
+        B, T = idx.size()
+        assert T <= self.config.block_size, f"Cannot foward sequence of legth {T}. Block size is {self.config.block_size}"
+        # Foward token and posit embd
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # Ints from 0 to T, (T)
+        pos_embd = self.transformer.wpe(pos) # Posit Look-Up => (T, n_embd)
+        tok_embd = self.transformer.wte(idx) # Token Look-Up => (T, n_embd)
+        x = pos_embd + tok_embd
+        # Encoder foward pass (blocks and norm)
+        for block in self.encoder.h:
+            x = block(x)
+        x = self.encoder.ln_f(x) # (B,T,C)
+        # DynChunk
+        p,bt = self.chunking.route(x,self.bias)
+        x_chunks, P_chunks, mask_ds, state = self.chunking.downsample(x,p,bt)
+        # M        
+        for block in self.m.h:
+            x_m = block(x_chunks)
+        x_m = self.m.ln_f(x_m) # (B,T,C)
+        # Dechunking
+        x_ema = self.dechunk.ema(x_m,P_chunks)
+        x_up = self.dechunk.upsample(x_ema,state)
+        # Decoder        
+        for block in self.decoder.h:
+            x_d = block(x_up)
+        x_d = self.decoder.ln_f(x_d) # (B,T,C)
+        # Residual
+        x = x_d + self.residual(x)
+        # Output
+        logits = self.lm_head(x)
+        return logits
+
